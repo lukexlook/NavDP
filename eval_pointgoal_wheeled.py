@@ -238,15 +238,21 @@ trajectory_length = np.zeros((scene_config.num_envs))
 
 while simulation_app.is_running():
     with torch.inference_mode():
+        # === Observation Extraction ===
+        # Extract current goals, RGB images, and depth maps from environment observations
         goals = infos['observations']['goal_pose'].cpu().numpy()[:,0:2]
         images = infos['observations']['rgb'].cpu().numpy()[:,:,:,0:3]
         depths = infos['observations']['depth'].cpu().numpy()[:,:,:]
+        # Retrieve camera positions and orientations for coordinate frame transformations
         # get all camera poses
         camera_pos = env.unwrapped.scene.sensors['camera_sensor'].data.pos_w.cpu().numpy()
         camera_rot_quat = env.unwrapped.scene.sensors['camera_sensor'].data.quat_w_world.cpu().numpy()
+        # Reorder quaternion (w,x,y,z) to (x,y,z,w)
         camera_rot_quat = camera_rot_quat[:,[1, 2, 3, 0]]
         camera_rot = R.from_quat(camera_rot_quat).as_matrix()
         
+        # === Planning Input Update ===
+        # Thread-safe update of shared planning input with current sensor data
         with input_lock:
             planning_input.current_goal = goals.copy()
             planning_input.current_image = images.copy()
@@ -254,11 +260,17 @@ while simulation_app.is_running():
             planning_input.camera_pos = camera_pos.copy()
             planning_input.camera_rot = camera_rot.copy()
 
+        # === Robot State Estimation ===
+        # Extract current robot linear and angular velocities for MPC state initialization
         # based on the current world trajectory 
         robot_vel = env.unwrapped.scene.articulations['robot'].data.root_lin_vel_w[0, :2].norm().cpu().numpy()
         robot_ang_vel = env.unwrapped.scene.articulations['robot'].data.root_ang_vel_w[0, 2].cpu().numpy()
 
+        # Construct initial state vector [x, y, theta, v, omega] for MPC controller
         x0 = np.stack([camera_pos[:,0], camera_pos[:,1], np.arctan2(camera_rot[:,1,0], camera_rot[:,0,0]), [robot_vel], [robot_ang_vel]],axis=-1)
+
+        # === Planning Output Retrieval ===
+        # Thread-safe retrieval of latest planned trajectories and values from planning thread
         current_trajectory = None
         current_all_trajectories = None
         current_all_values = None
@@ -268,6 +280,8 @@ while simulation_app.is_running():
                 current_all_trajectories = planning_output.all_trajectories_world.copy() if planning_output.all_trajectories_world is not None else None
                 current_all_values = planning_output.all_values_camera.copy() if planning_output.all_values_camera is not None else None
         
+        # === Control Execution (Trajectory Available) ===
+        # If planning thread has provided a trajectory, execute MPC control and visualize
         if current_trajectory is not None:
             control_start = time.time()
             action_list = []
@@ -307,11 +321,16 @@ while simulation_app.is_running():
             actual_joint_velocities = env.unwrapped.scene.articulations['robot'].data.joint_vel[0, :2].cpu().numpy()
             desired_joint_velocities = env.unwrapped.scene.articulations['robot'].data.joint_vel_target[0, :2].cpu().numpy()
             trajectory_length += (infos['observations']['policy'][:,0] * env.unwrapped.step_dt).cpu().numpy()
+
+            # === Fallback Control (No Trajectory) ===
+            # If no trajectory is available from planning, apply zero action to keep robot stationary
         else:
             action = torch.zeros((args_cli.num_envs, 2), device="cuda:0")
             obs, rewards, dones, infos = env.step(action)
             print("No trajectory available, using zero action")
         
+        # === Episode Management ===
+        # Check for episode termination, reset environments, and collect evaluation metrics
         for i in range(args_cli.num_envs):
             if dones[i] == True:
                 episode_num += 1
@@ -326,6 +345,8 @@ while simulation_app.is_running():
                 fps_writer[i] = imageio.get_writer(save_dir + "fps_%d.mp4"%episode_num, fps=10)
                 trajectory_length[i] = 0.0
         
+        # === Loop Termination Check ===
+        # Exit simulation loop once all episodes have been completed
         if episode_num > args_cli.num_episodes:
             break
        
