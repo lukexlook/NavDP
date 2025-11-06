@@ -89,6 +89,8 @@ def planning_thread(env, camera_intrinsic):
     """Thread function that continuously plans trajectories"""
     while not stop_event.is_set():
         try:
+            # === Input Data Acquisition ===
+            # Thread-safe retrieval of the latest sensor data and goals from the main thread
             # Get latest observations from shared state
             with input_lock:
                 if planning_input.current_goal is None or planning_input.current_image is None or planning_input.current_depth is None or planning_input.camera_pos is None or planning_input.camera_rot is None:
@@ -99,12 +101,18 @@ def planning_thread(env, camera_intrinsic):
                 depth = planning_input.current_depth.copy()
                 camera_pos = planning_input.camera_pos.copy()
                 camera_rot = planning_input.camera_rot.copy()
+            # Set planning flag to indicate planning is in progress
             with output_lock:
                 planning_output.is_planning = True
             
+            # === Planning Execution ===
+            # Start timing and execute diffusion-based trajectory planning
             # Start timing planning
             planning_start = time.time()
             trajectory_points_camera, all_trajectories_camera, all_values_camera = pointgoal_step(goal, image, depth,port=args_cli.port)
+
+            # === Trajectory Transformation ===
+            # Transform planned trajectories from camera coordinate frame to world coordinate frame
             # Transform trajectory from camera frame to world frame
             batch_optimal_points_world = []
             for idx in range(trajectory_points_camera.shape[0]):
@@ -117,6 +125,7 @@ def planning_thread(env, camera_intrinsic):
                     trajectory_points_world.append(point_world[:2])
                 trajectory_points_world = np.array(trajectory_points_world)
                 batch_optimal_points_world.append(trajectory_points_world)
+                # Initialize MPC controller for trajectory tracking with desired speed constraints
                 mpc = MPC_Controller(trajectory_points_world,
                                      desired_v=args_cli.speed,
                                      v_max=args_cli.speed,
@@ -137,6 +146,8 @@ def planning_thread(env, camera_intrinsic):
                 batch_all_points_world.append(all_trajectories_world)
             batch_all_points_world = np.array(batch_all_points_world)
 
+            # === Output Update ===
+            # Thread-safe update of shared planning output with transformed trajectories and planning status
             # Update shared state
             with output_lock:
                 planning_output.trajectory_points_world = batch_optimal_points_world
@@ -145,15 +156,22 @@ def planning_thread(env, camera_intrinsic):
                 planning_output.is_planning = False
                 planning_output.planning_error = None
             
+            # === Planning Timing ===
+            # Calculate and optionally log planning execution time for performance monitoring
             # Print planning timing
             planning_time = time.time() - planning_start
             # print(f"Planning time: {planning_time:.3f}s, Goal: [{goal[0]:.2f}, {goal[1]:.2f}, {goal[2]:.2f}]")
                 
+        # === Error Handling ===
+        # Catch and log any exceptions during planning, update output status accordingly
         except Exception as e:
             print(f"Planning error: {e}")
             with output_lock:
                 planning_output.is_planning = False
                 planning_output.planning_error = str(e)
+
+        # === Thread Sleep ===
+        # Brief pause to prevent excessive CPU usage and allow main thread to update inputs
         # Small sleep to prevent CPU overload
         time.sleep(0.1)
 
