@@ -1,5 +1,16 @@
+# =============================================================================
+# Entry point for evaluating point goal navigation in wheeled robots using diffusion-based planning
+# This script sets up a simulation environment, runs trajectory planning in a separate thread,
+# and evaluates the robot's performance in reaching specified goals.
+# =============================================================================
+
 import argparse
 from omni.isaac.lab.app import AppLauncher
+
+# =============================================================================
+# Argument Parsing and Application Launch
+# Sets up command-line arguments for configuration and launches the Isaac Sim app.
+# =============================================================================
 
 parser = argparse.ArgumentParser(description="A script to run a car control simulation")
 parser.add_argument(
@@ -21,6 +32,11 @@ parser.add_argument(
 args_cli = parser.parse_args()
 app_launcher = AppLauncher(headless=True, enable_cameras=True)
 simulation_app = app_launcher.app
+
+# =============================================================================
+# Additional Imports
+# Imports necessary libraries for simulation, data processing, and utilities.
+# =============================================================================
 
 import omni
 import cv2
@@ -49,6 +65,11 @@ from utils_tasks.client_utils import navigator_reset,pointgoal_step
 from utils_tasks.visualization_utils import VisualizationManager
 from utils_tasks.tracking_utils import MPC_Controller
 
+# =============================================================================
+# Global Variables and Initialization
+# Initializes shared data structures for planning input/output, threading, and visualization.
+# =============================================================================
+
 planning_input = PlanningInput() 
 planning_output = PlanningOutput()
 input_lock = threading.Lock()
@@ -56,6 +77,12 @@ output_lock = threading.Lock()
 stop_event = threading.Event()
 vis_manager = [VisualizationManager(history_size=5) for i in range(args_cli.num_envs)]
 mpc = None
+
+# =============================================================================
+# Planning Thread Function
+# Runs in a separate thread to continuously plan trajectories using diffusion model.
+# Transforms trajectories from camera to world frame and updates MPC controller.
+# =============================================================================
 
 def planning_thread(env, camera_intrinsic):
     global mpc
@@ -130,6 +157,11 @@ def planning_thread(env, camera_intrinsic):
         # Small sleep to prevent CPU overload
         time.sleep(0.1)
 
+# =============================================================================
+# Scene and Environment Configuration
+# Configures the scene, robot, sensors, and environment settings for the simulation.
+# =============================================================================
+
 scene_path = os.path.join(args_cli.scene_dir,os.listdir(args_cli.scene_dir)[args_cli.scene_index]) + "/"
 usd_path,init_path = find_usd_path(scene_path,task='pointgoal')
 scene_config = PointNavSceneCfg()
@@ -150,6 +182,11 @@ env_config.events.reset_pose.params = {"init_point_path":init_path,
 env = ManagerBasedRLEnv(env_config)
 env = RslRlVecEnvWrapper(env)
 adjust_usd_scale(scale=args_cli.scene_scale)
+# =============================================================================
+# Environment Setup and Warm-up
+# Initializes the environment, performs warm-up steps, and extracts camera intrinsics.
+# =============================================================================
+
 _,infos = env.reset()
 # warm-up
 PREHEAT_STEPS = 10
@@ -159,14 +196,29 @@ for _ in range(PREHEAT_STEPS):
     
 camera_intrinsic = env.unwrapped.scene.sensors['camera_sensor'].data.intrinsic_matrices[0]
 
+# =============================================================================
+# Planning Thread Start
+# Starts the planning thread that runs concurrently with the main simulation loop.
+# =============================================================================
+
 planning_thread_obj = threading.Thread(target=planning_thread, args=(env, camera_intrinsic))
 planning_thread_obj.daemon = True
 planning_thread_obj.start()
+
+# =============================================================================
+# Controller and Algorithm Initialization
+# Initializes the differential drive controller and the navigation algorithm.
+# =============================================================================
 
 controller = DifferentialController(name="simple_control", 
                                     wheel_radius=DINGO_WHEEL_RADIUS,
                                     wheel_base=DINGO_WHEEL_BASE)
 algo = navigator_reset(camera_intrinsic.cpu().numpy(),batch_size=scene_config.num_envs,stop_threshold=args_cli.stop_threshold,port=args_cli.port)
+
+# =============================================================================
+# Evaluation Setup
+# Prepares metrics collection, video recording, and trajectory tracking for evaluation.
+# =============================================================================
 
 episode_num = args_cli.num_envs - 1
 evaluation_metrics = []
@@ -177,6 +229,12 @@ euclidean = np.sqrt(np.square(infos['observations']['goal_pose'].cpu().numpy()[:
 fps_writer = [imageio.get_writer(save_dir + "fps_%d.mp4"%i, fps=10) for i in range(scene_config.num_envs)]
 
 trajectory_length = np.zeros((scene_config.num_envs))
+
+# =============================================================================
+# Main Simulation Loop
+# Runs the simulation, processes sensor data, executes planning and control,
+# handles episode termination, and collects evaluation metrics.
+# =============================================================================
 
 while simulation_app.is_running():
     with torch.inference_mode():
