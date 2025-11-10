@@ -15,55 +15,65 @@ class VisualizationManager:
         
     def build_occupancy_grid(self, depth_map, intrinsic, camera_roll=0):
         try:
-            """Convert depth image to occupancy grid in BEV"""
+            # 1. Depth Map Preprocessing: Handle multi-channel depth maps and extract dimensions
             if len(depth_map.shape) == 3:
                 depth_map = depth_map[:,:,0]
             height, width = depth_map.shape
+
+            # 2. 3D Point Cloud Generation: Convert depth pixels to 3D world coordinates using camera intrinsics
+            # Create pixel coordinate grids for all image pixels
             uu, vv = np.meshgrid(np.arange(width), np.arange(height))
             z = depth_map
+            # Convert pixel coordinates to camera coordinates: x = (u - cx) * z / fx, y = (v - cy) * z / fy
+            # Somewhat, pinhole model re-projection
             x = (uu - intrinsic[0, 2]) * z / intrinsic[0, 0]
             y = (vv - intrinsic[1, 2]) * z / intrinsic[1, 1]
-            
-            # Filter valid points
+
+            # 3. Point Filtering: Keep only valid depth measurements
             valid_mask = (z > 0) & np.isfinite(z) & (z < 10)
             points_3d = np.stack((x[valid_mask], y[valid_mask], z[valid_mask]), axis=-1)
-            
-            # Apply camera roll
+
+            # 4. Camera Roll Compensation: Apply rotation around X-axis to account for camera tilt
             roll = camera_roll * np.pi / 180
             rotation_matrix_x = np.array([[1, 0, 0], 
                                         [0, np.cos(roll), -np.sin(roll)], 
                                         [0, np.sin(roll), np.cos(roll)]])
             point_3d_flat = (rotation_matrix_x @ points_3d.transpose()).transpose()
-            
-            # Transform to world coordinates
+
+            # 5. Coordinate System Transformation: Convert from camera frame to world frame
+            # World coordinates: x=forward (depth), y=left/right, z=up/down
             point_3d_world = np.zeros((point_3d_flat.shape[0], 3))
             point_3d_world[:, 0] = point_3d_flat[:, 2]
             point_3d_world[:, 1] = -point_3d_flat[:, 0]
             point_3d_world[:, 2] = -point_3d_flat[:, 1]
+
+            # 6. Ground Plane Estimation: Find most common height and normalize ground to z=0
             bins = np.arange(np.min(point_3d_world[:, 2]), np.max(point_3d_world[:, 2]), 0.05)
             try:
                 hist, bin_edges = np.histogram(point_3d_world[:, 2], bins=bins)
-                max_freq_index = np.argmax(hist)
-                point_3d_world[:, 2] -= bin_edges[max_freq_index]
+                max_freq_index = np.argmax(hist)  # Most frequent height bin = ground plane
+                point_3d_world[:, 2] -= bin_edges[max_freq_index]  # Normalize ground to z=0
                 # print(f"bin_edges[max_freq_index] {bin_edges[max_freq_index]}")
             except:
-                point_3d_world[:, 2] -= -0.5
-            
-            # Filter points within height range
+                point_3d_world[:, 2] -= -0.5  # Fallback: assume ground is at -0.5m
+
+            # 7. Obstacle Filtering: Keep only points that represent obstacles (not ground or sky)
             filtered_points = point_3d_world[(point_3d_world[:, 2] >= 0.2) & (point_3d_world[:, 2] <= 1.5)]
             if filtered_points.shape[0] == 0:
+                # No obstacles found, return default empty grid
                 min_coords = np.array([-5.0,-5.0,-5.0])
                 max_coords = np.array([5.0,5.0,5.0])
                 grid_size = np.ceil((max_coords - min_coords) / self.resolution + 1).astype(int)
                 occupancy_grid = np.zeros(grid_size[:2], dtype=np.int8)
                 return occupancy_grid, min_coords
-                
-            # Create occupancy grid
+
+            # 8. Occupancy Grid Creation: Build 2D grid from filtered 3D points
             min_coords = np.min(filtered_points, axis=0)
             max_coords = np.max(filtered_points, axis=0)
             grid_size = np.ceil((max_coords - min_coords) / self.resolution + 1).astype(int)
             occupancy_grid = np.zeros(grid_size[:2], dtype=np.int8)
-            
+
+            # Convert world coordinates to grid indices and mark occupied cells
             grid_coords = ((filtered_points[:, :2] - min_coords[:2]) / self.resolution).astype(int)
             occupancy_grid[grid_coords[:, 0], grid_coords[:, 1]] = 1
             
